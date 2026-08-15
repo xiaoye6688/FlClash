@@ -5,7 +5,7 @@ use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{GenericFilePath, ListenerNonblockingMode, ListenerOptions};
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -132,11 +132,12 @@ pub fn send_ipc_message(data: Vec<u8>) -> Result<(), String> {
         .clone()
         .ok_or("IPC client is not connected")?;
 
-    match tx.try_send(data) {
-        Ok(()) => Ok(()),
-        Err(TrySendError::Full(_)) => Err("IPC send queue is full".into()),
-        Err(TrySendError::Disconnected(_)) => Err("IPC client is disconnected".into()),
-    }
+    enqueue_ipc_message(&tx, data)
+}
+
+fn enqueue_ipc_message(tx: &SyncSender<Vec<u8>>, data: Vec<u8>) -> Result<(), String> {
+    tx.send(data)
+        .map_err(|_| "IPC client is disconnected".to_owned())
 }
 
 fn validate_frame_len(len: usize) -> io::Result<u32> {
@@ -467,6 +468,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::io::Cursor;
+    use std::sync::Barrier;
 
     enum ReadStep {
         Data(Vec<u8>),
@@ -529,6 +531,37 @@ mod tests {
             frame_reader.poll(&mut reader).unwrap(),
             Some(b"hello".to_vec())
         );
+    }
+
+    #[test]
+    fn ipc_queue_applies_backpressure_without_dropping_burst_messages() {
+        const MESSAGE_COUNT: usize = 32;
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(MAX_PENDING_MESSAGES);
+        let barrier = Arc::new(Barrier::new(MESSAGE_COUNT + 1));
+        let mut senders = Vec::with_capacity(MESSAGE_COUNT);
+
+        for value in 0..MESSAGE_COUNT {
+            let tx = tx.clone();
+            let barrier = Arc::clone(&barrier);
+            senders.push(thread::spawn(move || {
+                barrier.wait();
+                enqueue_ipc_message(&tx, vec![value as u8])
+            }));
+        }
+
+        barrier.wait();
+        thread::sleep(Duration::from_millis(50));
+
+        let mut received = Vec::with_capacity(MESSAGE_COUNT);
+        for _ in 0..MESSAGE_COUNT {
+            received.push(rx.recv_timeout(Duration::from_secs(1)).unwrap()[0]);
+        }
+
+        for sender in senders {
+            assert_eq!(sender.join().unwrap(), Ok(()));
+        }
+        received.sort_unstable();
+        assert_eq!(received, (0..MESSAGE_COUNT as u8).collect::<Vec<_>>());
     }
 
     #[test]

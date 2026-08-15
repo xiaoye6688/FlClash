@@ -1,0 +1,55 @@
+name: build-windows-self
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/windows-ipc-backpressure
+
+env:
+  FLUTTER_VERSION: '3.44.4'
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Enable Git long paths
+        run: git config --global core.longpaths true
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.4'
+          cache-dependency-path: core/go.sum
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path plugins/rust_api/rust/Cargo.toml -- --check
+
+      - name: Test Rust IPC
+        run: cargo test --manifest-path plugins/rust_api/rust/Cargo.toml
+
+      - name: Build Windows packages
+        run: dart setup.dart windows --env stable -v
+
+      - name: Upload Windows packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlClash-windows-amd64-ipc-backpressure
+          path: dist/
+          if-no-files-found: error
+          overwrite: true
