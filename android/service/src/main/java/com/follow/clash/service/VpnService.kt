@@ -57,13 +57,18 @@ class VpnService : SystemVpnService(), ManagedService {
     private fun resolvePackage(uid: Int): String {
         val cached = uidPackageNameMap[uid]
         if (cached != null) return cached
-        val packageName = packageManager
-            .getPackagesForUid(uid)
-            ?.firstOrNull()
-            ?.takeIf { it.isNotEmpty() }
-            .orEmpty()
+        // A uid from another user (an app clone under ColorOS runs as user 999,
+        // so its uid is 999 * 100000 + appId) names no package in this user;
+        // the same appId under the owner user does, and it is the package
+        // PROCESS rules and the connection list mean.
+        val packageName = (findPackage(uid) ?: findPackage(uid % UID_PER_USER)).orEmpty()
         return uidPackageNameMap.putIfAbsent(uid, packageName) ?: packageName
     }
+
+    private fun findPackage(uid: Int): String? = packageManager
+        .getPackagesForUid(uid)
+        ?.firstOrNull()
+        ?.takeIf { it.isNotEmpty() }
 
     private val VpnOptions.tunAddress
         get(): String = buildString {
@@ -302,5 +307,8 @@ class VpnService : SystemVpnService(), ManagedService {
         private const val NET_ANY = "0.0.0.0"
         private const val NET_ANY6 = "::"
         private const val LOCAL_HOST = "127.0.0.1"
+
+        // Android packs a uid as userId * 100000 + appId.
+        private const val UID_PER_USER = 100000
     }
 }
