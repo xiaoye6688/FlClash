@@ -1,0 +1,119 @@
+name: fork-android
+
+# Fork-only packaging: the upstream `build` job in build.yaml is gated to
+# chen08209/FlClash, so this workflow builds an arm64 Android APK on this
+# branch and publishes it as a prerelease on this repository.
+on:
+  push:
+    branches:
+      - 'fix/clone-apps-vpn'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FLUTTER_VERSION: '3.47.6'
+  GO_VERSION: '1.27.1'
+  NDK_VERSION: r28c
+  RELEASE_TAG: v0.9.3-clonefix.1
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: |
+            core/go.sum
+            plugins/setup/setup_hooks/lib/src/go_builder.dart
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup NDK
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          link-to-sdk: true
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Get Flutter Dependency
+        run: flutter pub get
+
+      # The core embeds this bundle; it is not committed to the repository.
+      - name: Fetch CA certificates
+        env:
+          CA_BUNDLE: cacert-2026-09-25.pem
+          CA_BUNDLE_SHA256: a41b5d356aea97a529fe27e0f7316d2f9d946d75927476cf9cf1b90637d00505
+        run: |
+          bundle=core/Clash.Meta/component/ca/ca-certificates.crt
+          curl -fsSL --retry 3 -o "$bundle" "https://curl.se/ca/$CA_BUNDLE"
+          echo "$CA_BUNDLE_SHA256  $bundle" | sha256sum -c -
+
+      - name: Build Android APK (arm64)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: dart setup.dart android --arch arm64 -v
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-android-arm64
+          path: ./dist
+          overwrite: true
+
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > release-notes.md <<'EOF'
+          实验版：尝试修复「应用分身（ColorOS User 999）无法正常走 FlClash 代理」，基于官方 v0.9.3。
+
+          本版改动（android/service 的 VpnService）：
+          - 连接归属解析增加跨用户回退：分身应用的 uid（如 99910449 = 999×100000 + 10449）在主用户下查不到包名时，按 appId 回退到主用户同一应用解析。这样进入核心的分身连接能被正确识别包名，PROCESS-NAME 等按应用规则和连接列表归属不再落空。
+
+          必须说明的限制：
+          - Android 平台层面 VPN 按用户隔离，普通应用没有任何公开 API 能把另一个用户的流量整体拉进本用户的 VPN；上游 issue #2039 也是被维护者未说明原因直接关闭的。本版是机制上能落地的改动，未在真机验证，不保证在你的 ColorOS 版本上完全生效，需要你在一加手机上实测。
+          - 本包没有官方签名，使用调试签名 + .dev 包名，可与官方版并存安装，配置需重新导入。
+          - 若分身仍异常，请在「设置 → 网络 → TUN」里把 MTU 改成 1500 再测一次（分身流量在 ColorOS 上多一层转发时，大 MTU 容易黑洞式卡慢），并把结果反馈回来以便定位。
+
+          仅 arm64-v8a，适用于一加等 arm64 手机。
+          EOF
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/*.apk --clobber
+            gh release edit "$RELEASE_TAG" --notes-file release-notes.md
+          else
+            gh release create "$RELEASE_TAG" dist/*.apk \
+              --target "$GITHUB_SHA" \
+              --title "v0.9.3-clonefix.1 (experimental: app-clone VPN fix attempt)" \
+              --notes-file release-notes.md \
+              --prerelease
+          fi
